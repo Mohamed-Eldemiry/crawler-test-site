@@ -5,6 +5,7 @@
 //   /s503/   نفس الفكرة لكن بيرد 503
 //   /never/  بيرفض كل حاجة بـ 403 من أول طلب (موقع بيحجب السيرفر خالص)
 //   /still/  أول 15 صفحة تمام، وبعدها بيرفض كل حاجة بـ 403 للأبد
+// /never/sitemap.xml و /still/sitemap.xml بيعرضوا 80 رابط للقسم، عشان الـ crawler يلاقي طابور كبير من أول لحظة (زي موقع حقيقي عنده Sitemap).
 // /stats بيعرض اللي حصل، و /reset بيصفّر العدّادات (وبتتصفّر لوحدها بعد 15 دقيقة من غير طلبات).
 const http = require("http");
 
@@ -52,6 +53,12 @@ function createServer() {
     if (path === "/") return send(200, "<!doctype html><html><head><title>Crawler test site</title></head><body><p>Crawler test site. See /stats</p></body></html>");
     if (path === "/stats") { const o = {}; for (const [k, s] of Object.entries(state)) o[k] = { requests: s.requests, ok: s.ok, refused: s.refused, bans: s.bans }; return send(200, JSON.stringify(o, null, 2), "application/json"); }
     if (path === "/reset") { for (const k of Object.keys(state)) state[k] = fresh(); console.log("[reset]"); return send(200, "reset done", "text/plain"); }
+    const sm = /^\/(never|still)\/sitemap\.xml$/.exec(path);
+    if (sm) {
+      const base = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`; const u = [];
+      for (let i = 0; i < PAGES; i++) u.push(`<url><loc>${base}/${sm[1]}/p${i}</loc></url>`);
+      return send(200, `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${u.join("")}</urlset>`, "application/xml");
+    }
     const m = /^\/(s403|s429|s503|never|still)(?:\/(?:p(\d+))?)?$/.exec(path);
     if (!m) return send(404, "not found", "text/plain");
     const sec = m[1], n = m[2] === undefined ? null : Number(m[2]);
