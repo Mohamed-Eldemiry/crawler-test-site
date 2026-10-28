@@ -9,13 +9,15 @@
 //   /startban2/  نفس /startban/ لكن من غير Sitemap
 //   /flaky/      استضافة ضعيفة: كل صفحة بتاخد حوالي ثانية ونص عشان تتخدم، ولو طلب تاني جه وهي بتخدم الأول بتقطع الاتصال عليه (زي سيرفر مش بيستحمل طلبين مع بعض)
 //   /flaky504/  نفس /flaky/ لكن بدل قطع الاتصال بترد 504
+//   /h403/   من غير Sitemap. أول طلب للرئيسية بس بيترفض 403 (بعد كده الرئيسية تمام). أول 25 طلب صفحة تمام، وبعدها كل حاجة بتترفض 403 لمدة 90 ثانية، وبعدها تمام
+//   /hctl/   نفس /h403/ بالظبط لكن الرئيسية مبتترفضش أبدًا (للمقارنة)
 // /never/sitemap.xml و /still/sitemap.xml بيعرضوا 80 رابط للقسم، عشان الـ crawler يلاقي طابور كبير من أول لحظة (زي موقع حقيقي عنده Sitemap).
 // /stats بيعرض اللي حصل، و /reset بيصفّر العدّادات (وبتتصفّر لوحدها بعد 15 دقيقة من غير طلبات).
 const http = require("http");
 
 const PAGES = 80;
 const FLAKY_DELAY_MS = Number(process.env.FLAKY_DELAY_MS) || 1200;
-const WINDOW_MS = 3000, LIMIT = 4, BAN_MS = 20000, START_BAN_MS = 25000, IDLE_RESET_MS = 15 * 60 * 1000, STILL_OK_PAGES = 15;
+const WINDOW_MS = 3000, LIMIT = 4, BAN_MS = 20000, START_BAN_MS = 25000, IDLE_RESET_MS = 15 * 60 * 1000, STILL_OK_PAGES = 15, H_OK_PAGES = 25, H_BAN_MS = 90000;
 const SECTIONS = {
   s403: { kind: "speed", status: 403 },
   s429: { kind: "speed", status: 429, retryAfter: 20 },
@@ -26,8 +28,10 @@ const SECTIONS = {
   startban2: { kind: "startban", status: 403 },
   flaky: { kind: "weak", mode: "drop" },
   flaky504: { kind: "weak", mode: "504" },
+  h403: { kind: "homeonce", status: 403, firstRefused: true },
+  hctl: { kind: "homeonce", status: 403, firstRefused: false },
 };
-const fresh = () => ({ busy: false, startAt: 0, times: [], bannedUntil: 0, requests: 0, ok: 0, refused: 0, bans: 0, lastAt: 0, firstAt: 0 });
+const fresh = () => ({ homeHits: 0, pageHits: 0, hBanUntil: 0, busy: false, startAt: 0, times: [], bannedUntil: 0, requests: 0, ok: 0, refused: 0, bans: 0, lastAt: 0, firstAt: 0 });
 const state = {}; for (const k of Object.keys(SECTIONS)) state[k] = fresh();
 
 const WORDS = "contact services pricing support team about company policy delivery returns warranty booking quote consultation experience quality customers solutions industry location hours account payment shipping".split(" ");
@@ -47,6 +51,13 @@ function decide(sec, n, now) { // بترجّع null (تمام) أو { status, he
   if (s.lastAt && now - s.lastAt > IDLE_RESET_MS) Object.assign(s, fresh());
   s.lastAt = now; if (!s.firstAt) s.firstAt = now; s.requests++;
   const refuse = () => { s.refused++; return { status: cfg.status, headers: cfg.retryAfter ? { "Retry-After": String(cfg.retryAfter) } : {} }; };
+  if (cfg.kind === "homeonce") { // الرئيسية (n === null) بتترفض أول مرة بس (h403)، وبعد H_OK_PAGES طلب صفحة: حجب H_BAN_MS
+    if (n === null) { s.homeHits++; if (cfg.firstRefused && s.homeHits === 1) return refuse(); s.ok++; return null; }
+    s.pageHits++;
+    if (s.pageHits === H_OK_PAGES + 1) { s.hBanUntil = now + H_BAN_MS; s.bans++; console.log(`[${sec}] ban started for ${H_BAN_MS / 1000}s`); }
+    if (s.pageHits > H_OK_PAGES && now < s.hBanUntil) return refuse();
+    s.ok++; return null;
+  }
   if (cfg.kind === "all") return refuse();
   if (cfg.kind === "startban") { if (!s.startAt) s.startAt = now; if (now < s.startAt + START_BAN_MS) return refuse(); s.ok++; return null; }
   if (cfg.kind === "after") { if (s.ok >= STILL_OK_PAGES) return refuse(); s.ok++; return null; }
@@ -61,7 +72,7 @@ function createServer() {
     const send = (code, body, type = "text/html; charset=utf-8", headers = {}) => { res.writeHead(code, { "Content-Type": type, ...headers }); res.end(body); };
     let path; try { path = decodeURIComponent(new URL(req.url, "http://x").pathname); } catch { return send(400, "bad"); }
     if (path === "/") return send(200, "<!doctype html><html><head><title>Crawler test site</title></head><body><p>Crawler test site. See /stats</p></body></html>");
-    if (path === "/stats") { const o = {}; for (const [k, s] of Object.entries(state)) o[k] = { requests: s.requests, ok: s.ok, refused: s.refused, bans: s.bans }; return send(200, JSON.stringify(o, null, 2), "application/json"); }
+    if (path === "/stats") { const o = {}; for (const [k, s] of Object.entries(state)) o[k] = { requests: s.requests, ok: s.ok, refused: s.refused, bans: s.bans, homeHits: s.homeHits, pageHits: s.pageHits }; return send(200, JSON.stringify(o, null, 2), "application/json"); }
     if (path === "/reset") { for (const k of Object.keys(state)) state[k] = fresh(); console.log("[reset]"); return send(200, "reset done", "text/plain"); }
     const sm = /^\/(never|still|startban)\/sitemap\.xml$/.exec(path);
     if (sm) {
@@ -69,7 +80,7 @@ function createServer() {
       for (let i = 0; i < PAGES; i++) u.push(`<url><loc>${base}/${sm[1]}/p${i}</loc></url>`);
       return send(200, `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${u.join("")}</urlset>`, "application/xml");
     }
-    const m = /^\/(s403|s429|s503|never|still|startban2|startban|flaky504|flaky)(?:\/(?:p(\d+))?)?$/.exec(path);
+    const m = /^\/(s403|s429|s503|never|still|startban2|startban|flaky504|flaky|h403|hctl)(?:\/(?:p(\d+))?)?$/.exec(path);
     if (!m) return send(404, "not found", "text/plain");
     const sec = m[1], n = m[2] === undefined ? null : Number(m[2]);
     if (n !== null && n >= PAGES) return send(404, "not found", "text/plain");
